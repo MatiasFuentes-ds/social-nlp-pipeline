@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 # api/main.py → parent = api/ → parent.parent = raíz del proyecto
 _BASE_DIR: Path = Path(__file__).resolve().parent.parent
-DB_PATH: Path = _BASE_DIR / "data" / "databaser.db"
+DB_PATH: Path = _BASE_DIR / "src" / "data" / "databaser.db"
 
 # ---------------------------------------------------------------------------
 # Aplicación FastAPI
