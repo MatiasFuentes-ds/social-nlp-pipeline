@@ -2,20 +2,22 @@
 api/main.py
 
 API RESTful construida con FastAPI para servir los datos procesados de NLP
-desde la base de datos SQLite hacia un frontend en Streamlit.
+desde la base de datos SQLite hacia un frontend en Streamlit, e integrar
+la ejecución del pipeline de análisis directamente desde un endpoint REST.
 
 Uso (desarrollo local):
-    python api/main.py
     uvicorn api.main:app --reload --port 8000
 
-Documentación interactiva disponible en:
+Documentación interactiva:
     http://localhost:8000/docs     (Swagger UI)
     http://localhost:8000/redoc    (ReDoc)
 """
 
+import re
 import sqlite3
+import sys
 from pathlib import Path
-from typing import Generator, List
+from typing import Dict, Generator, List
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
@@ -23,11 +25,48 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
-# Resolución de ruta a la base de datos (absoluta, independiente del CWD)
+# Resolución de rutas — independiente del CWD
 # ---------------------------------------------------------------------------
 # api/main.py → parent = api/ → parent.parent = raíz del proyecto
 _BASE_DIR: Path = Path(__file__).resolve().parent.parent
 DB_PATH: Path = _BASE_DIR / "src" / "data" / "databaser.db"
+
+# Agrega src/ al path para que los imports de YoutubeDataClient y NLPProcessor
+# funcionen sin importar desde qué directorio se lanza uvicorn.
+_SRC_DIR: Path = _BASE_DIR / "src"
+if str(_SRC_DIR) not in sys.path:
+    sys.path.append(str(_SRC_DIR))
+
+from youtube_client import YoutubeDataClient  # noqa: E402
+from nlp_processor import NLPProcessor        # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Regex para extraer video_id de cualquier formato estándar de YouTube
+# ---------------------------------------------------------------------------
+# Cubre:
+#   https://www.youtube.com/watch?v=VIDEO_ID
+#   https://youtu.be/VIDEO_ID
+#   https://www.youtube.com/embed/VIDEO_ID
+#   https://www.youtube.com/shorts/VIDEO_ID
+_YT_VIDEO_ID_RE = re.compile(
+    r"(?:youtube\.com/(?:watch\?(?:.*&)?v=|embed/|shorts/)|youtu\.be/)"
+    r"([A-Za-z0-9_-]{11})"
+)
+
+
+def extract_video_id(url: str) -> str | None:
+    """Extrae el video_id (11 caracteres) de una URL estándar de YouTube.
+
+    Args:
+        url: URL completa del video de YouTube en cualquiera de sus formatos.
+
+    Returns:
+        String de 11 caracteres con el video_id, o ``None`` si la URL
+        no coincide con ningún formato reconocido.
+    """
+    match = _YT_VIDEO_ID_RE.search(url)
+    return match.group(1) if match else None
+
 
 # ---------------------------------------------------------------------------
 # Aplicación FastAPI
@@ -39,7 +78,7 @@ app = FastAPI(
         "extraídas de comentarios de YouTube mediante modelos de Hugging Face. "
         "Diseñada para alimentar dashboards interactivos en Streamlit."
     ),
-    version="1.0.0",
+    version="1.1.0",
     contact={
         "name": "NLP Pipeline",
         "url": "https://github.com/MatiasFuentes-ds/social-nlp-pipeline",
@@ -92,7 +131,7 @@ def get_db() -> Generator[sqlite3.Connection, None, None]:
 
 
 # ---------------------------------------------------------------------------
-# Pydantic schemas — modelos de respuesta para Swagger UI
+# Pydantic schemas
 # ---------------------------------------------------------------------------
 
 class HealthResponse(BaseModel):
@@ -153,8 +192,41 @@ class PaginatedComments(BaseModel):
     items: List[CommentItem]
 
 
+class AnalyzeURLRequest(BaseModel):
+    """Cuerpo de la petición para analizar un video de YouTube por URL.
+
+    Attributes:
+        url: URL completa del video (soporta youtube.com/watch, youtu.be,
+            embed y shorts).
+        max_pages: Número máximo de páginas de comentarios a extraer.
+            Se limita a 3 por defecto para proteger la cuota de la API de
+            YouTube durante la etapa de desarrollo.
+    """
+
+    url: str = Field(
+        ...,
+        examples=["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+        description="URL del video de YouTube a analizar.",
+    )
+    max_pages: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Páginas de comentarios a extraer (1-10). Default: 3.",
+    )
+
+
+class AnalyzeURLResponse(BaseModel):
+    """Respuesta devuelta tras completar el análisis de un video."""
+
+    status: str = Field(..., examples=["success"])
+    message: str
+    video_id: str
+    comments_processed: int
+
+
 # ---------------------------------------------------------------------------
-# Endpoints
+# Endpoints GET (sin modificaciones respecto a la versión anterior)
 # ---------------------------------------------------------------------------
 
 @app.get(
@@ -330,9 +402,94 @@ def get_comments(
 
 
 # ---------------------------------------------------------------------------
+# Endpoint POST /api/analyze/url — pipeline completo desde URL de YouTube
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/api/analyze/url",
+    response_model=AnalyzeURLResponse,
+    summary="Analizar video de YouTube por URL",
+    tags=["Pipeline"],
+    status_code=200,
+)
+def analyze_url(request: AnalyzeURLRequest) -> AnalyzeURLResponse:
+    """Ejecuta el pipeline NLP completo a partir de una URL de YouTube.
+
+    Flujo interno:
+        1. Extrae el ``video_id`` de la URL recibida.
+        2. Purga la base de datos mediante ``NLPProcessor.clear_database()``.
+        3. Extrae comentarios con ``YoutubeDataClient.get_comments()``.
+        4. Ejecuta inferencia y persiste con ``NLPProcessor.run()``.
+
+    Args:
+        request: Cuerpo de la petición con ``url`` y ``max_pages``.
+
+    Returns:
+        AnalyzeURLResponse con el status, video_id y cantidad de comentarios
+        procesados.
+
+    Raises:
+        HTTPException 400: Si la URL no corresponde a un video de YouTube válido.
+        HTTPException 404: Si el video no tiene comentarios o el ID es inválido.
+        HTTPException 500: Si ocurre un fallo en la API de YouTube o en el modelo.
+    """
+    # -- Paso 1: Extraer video_id ------------------------------------------------
+    video_id = extract_video_id(request.url)
+    if not video_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No se pudo extraer un video_id válido de la URL: '{request.url}'. "
+                "Formatos aceptados: youtube.com/watch?v=..., youtu.be/..., "
+                "youtube.com/shorts/..., youtube.com/embed/..."
+            ),
+        )
+
+    try:
+        # -- Paso 2: Purgar base de datos ----------------------------------------
+        with NLPProcessor(db_path=str(DB_PATH)) as processor:
+            processor.clear_database()
+
+            # -- Paso 3: Extraer comentarios -------------------------------------
+            client = YoutubeDataClient()
+            comments: List[Dict] = client.get_comments(
+                video_id=video_id,
+                max_pages=request.max_pages,
+            )
+
+            # -- Validación: comentarios vacíos ----------------------------------
+            if not comments:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        f"No se encontraron comentarios para video_id='{video_id}'. "
+                        "Verifica que el video exista, sea público y tenga comentarios habilitados."
+                    ),
+                )
+
+            # -- Paso 4: Inferencia NLP + persistencia ---------------------------
+            processor.run(comments=comments, video_id=video_id)
+
+    except HTTPException:
+        # Re-lanzar HTTPExceptions sin envolverlas en un 500
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error inesperado durante el procesamiento del video '{video_id}': {exc}",
+        ) from exc
+
+    return AnalyzeURLResponse(
+        status="success",
+        message=f"Video '{video_id}' procesado correctamente.",
+        video_id=video_id,
+        comments_processed=len(comments),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Entry point — desarrollo local
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
