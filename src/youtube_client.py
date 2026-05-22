@@ -90,7 +90,7 @@ if __name__ == "__main__":
     client = YoutubeDataClient()
     
     # Probamos con un ID de video cualquiera.
-    test_video_id = "XS8-zm7Cmho" 
+    test_video_id = "S8enYup_FaY" 
     
     # Extraemos solo 2 páginas (aprox 200 comentarios) para no gastar cuota de la API
     extracted_data = client.get_comments(video_id=test_video_id, max_pages=2)

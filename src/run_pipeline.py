@@ -129,10 +129,8 @@ def run_nlp(
         batch_size,
     )
     with NLPProcessor(batch_size=batch_size) as processor:
-        processor.run(comments=comments, video_id=video_id)
-    logger.info(
-        "Procesamiento NLP completado | resultados persistidos en SQLite."
-    )
+        processor.clear_database() # purgar datos anteriores pre nueva ingesta
+        processor.run(comments, video_id) # procesar nuevo video :)
 
 
 # ---------------------------------------------------------------------------

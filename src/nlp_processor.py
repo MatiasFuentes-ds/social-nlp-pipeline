@@ -84,7 +84,7 @@ class NLPProcessor:
     DEFAULT_CANDIDATE_LABELS: List[str] = [
         "Music",
         "Controversy",
-        "Fashion/Yeezy",
+        "Fashion",
         "Politics",
         "Religion",
     ]
@@ -161,6 +161,35 @@ class NLPProcessor:
             conn.execute(_DDL_COMMENTS)
             conn.execute(_DDL_ANALYSIS)
         return conn
+
+    def clear_database(self) -> None:
+        """Elimina todos los registros de las tablas y reinicia los contadores.
+
+        Vacía las tablas ``analysis``, ``comments`` y ``videos`` en orden
+        (hijos antes que padres) para respetar las claves foráneas.
+        """
+        logger.info("Iniciando purga de la base de datos...")
+        try:
+            with self._conn:
+                self._conn.execute("PRAGMA foreign_keys=OFF;")
+                self._conn.execute("DELETE FROM analysis;")
+                self._conn.execute("DELETE FROM comments;")
+                self._conn.execute("DELETE FROM videos;")
+                self._conn.execute("PRAGMA foreign_keys=ON;")
+
+            try:
+                with self._conn:
+                    self._conn.execute(
+                        "DELETE FROM sqlite_sequence "
+                        "WHERE name IN ('videos', 'comments', 'analysis');"
+                    )
+            except sqlite3.OperationalError:
+                logger.debug("Tabla sqlite_sequence no encontrada, omitiendo reinicio de IDs.")
+
+            logger.info("Base de datos limpiada con éxito. Lista para nueva ingesta.")
+
+        except sqlite3.Error as exc:
+            logger.error("Error crítico durante la purga de la base de datos: %s", exc)
 
     def _upsert_video(self, video_id: str) -> None:
         """Inserta o reemplaza un registro en la tabla ``videos``.
@@ -430,7 +459,7 @@ class NLPProcessor:
         """Cierra recursos al salir del bloque with."""
         self.close()
 
-
+    
 # ---------------------------------------------------------------------------
 # Entry point — mock test
 # ---------------------------------------------------------------------------
@@ -488,6 +517,8 @@ if __name__ == "__main__":
     logger.info("=== Iniciando test con datos mock ===")
 
     with NLPProcessor(db_path="data/databaser.db", batch_size=4) as processor:
+        # Demostración del flujo completo con purga previa
+        processor.clear_database()
         processor.run(comments=MOCK_COMMENTS, video_id=MOCK_VIDEO_ID)
 
     # Verificación simple de los resultados guardados
@@ -517,4 +548,3 @@ if __name__ == "__main__":
         )
     conn.close()
     logger.info("=== Test completado exitosamente ===")
-
