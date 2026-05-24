@@ -42,8 +42,9 @@ _SENTIMENT_LABEL_MAP: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 _DDL_VIDEOS = """
 CREATE TABLE IF NOT EXISTS videos (
-    video_id     TEXT PRIMARY KEY,
-    processed_at TEXT NOT NULL
+video_id TEXT PRIMARY KEY,
+title TEXT,
+processed_at TEXT NOT NULL
 );
 """
 
@@ -90,7 +91,7 @@ class NLPProcessor:
     ]
 
     SENTIMENT_MODEL_ID = "cardiffnlp/twitter-roberta-base-sentiment-latest"
-    ZEROSHOT_MODEL_ID = "facebook/bart-large-mnli"
+    ZEROSHOT_MODEL_ID = "cross-encoder/nli-MiniLM2-L6-H768"
 
     def __init__(
         self,
@@ -191,18 +192,13 @@ class NLPProcessor:
         except sqlite3.Error as exc:
             logger.error("Error crítico durante la purga de la base de datos: %s", exc)
 
-    def _upsert_video(self, video_id: str) -> None:
-        """Inserta o reemplaza un registro en la tabla ``videos``.
-
-        Args:
-            video_id: Identificador único del video de YouTube.
-        """
+    def _upsert_video(self, video_id: str, title: str = "") -> None:
         processed_at = datetime.now(timezone.utc).isoformat()
         try:
             with self._conn:
                 self._conn.execute(
-                    "INSERT OR REPLACE INTO videos (video_id, processed_at) VALUES (?, ?);",
-                    (video_id, processed_at),
+                    "INSERT OR REPLACE INTO videos (video_id, title, processed_at) VALUES (?, ?, ?);",
+                    (video_id, title, processed_at),
                 )
         except sqlite3.Error as exc:
             logger.error("Error al insertar video '%s': %s", video_id, exc)
@@ -417,12 +413,14 @@ class NLPProcessor:
             video_id,
             len(comments),
         )
+        
+        self._video_title = getattr(self, "_video_title", "")
 
         # Inyectar video_id a cada comentario si no está presente
         for c in comments:
             c.setdefault("video_id", video_id)
 
-        self._upsert_video(video_id)
+        self._upsert_video(video_id, title=self._video_title)
         self._upsert_comments(comments)
 
         enriched = self.process_batch(comments)

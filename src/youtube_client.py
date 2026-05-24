@@ -80,6 +80,29 @@ class YoutubeDataClient:
         text = text.replace('\n', ' ').replace('\r', '').replace('\t', ' ')
         # Quitamos espacios dobles
         return ' '.join(text.split())
+    
+
+    def get_video_title(self, video_id: str) -> str:
+        """Obtiene el título de un video de YouTube.
+
+        Args:
+            video_id: Identificador único del video.
+
+        Returns:
+            Título del video como string, o el video_id como fallback si falla.
+        """
+        try:
+            request = self.youtube.videos().list(
+                part="snippet",
+                id=video_id,
+            )
+            response = request.execute()
+            items = response.get("items", [])
+            if items:
+                return items[0]["snippet"]["title"]
+        except Exception as e:
+            logging.error(f"Error al obtener título del video: {e}")
+        return video_id
 
 
 # ==========================================
