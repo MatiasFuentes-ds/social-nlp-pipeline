@@ -1,0 +1,52 @@
+# docker-compose.yml
+# Orquesta los dos servicios del proyecto: API (FastAPI) y Dashboard (Streamlit)
+# Uso:
+#   docker compose up --build    ← primera vez (construye imágenes)
+#   docker compose up            ← siguientes veces
+#   docker compose down          ← apagar todo
+
+services:
+
+  # ── Servicio 1: FastAPI + Pipeline NLP ──────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: nlp_api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env                          # carga YOUTUBE_API_KEY y otras variables
+    volumes:
+      # Persiste la base de datos SQLite fuera del contenedor
+      - db_data:/app/src/data
+      # Persiste el caché de modelos de Hugging Face (evita re-descargar)
+      - hf_cache:/app/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s             # tiempo para que carguen los modelos NLP
+    restart: unless-stopped
+
+  # ── Servicio 2: Streamlit Dashboard ─────────────────────────────────────────
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    container_name: nlp_dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      # Le dice al dashboard dónde está la API dentro de la red Docker interna
+      - API_URL=http://api:8000/api
+    depends_on:
+      api:
+        condition: service_healthy   # espera a que la API esté lista
+    restart: unless-stopped
+
+# ── Volúmenes persistentes ───────────────────────────────────────────────────
+volumes:
+  db_data:        # base de datos SQLite — sobrevive a reinicios del contenedor
+  hf_cache:       # caché de modelos HuggingFace — evita descargas repetidas

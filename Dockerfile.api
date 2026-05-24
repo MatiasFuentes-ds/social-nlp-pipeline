@@ -1,0 +1,36 @@
+# Dockerfile.api
+# Contenedor para FastAPI (api/main.py) — sirve la API REST en el puerto 8000
+
+FROM python:3.11-slim
+
+# Variables de entorno: evita .pyc y buffering en logs
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TRANSFORMERS_CACHE=/app/.cache/huggingface \
+    HF_HOME=/app/.cache/huggingface
+
+WORKDIR /app
+
+# 1. Instalar dependencias del sistema necesarias para torch y transformers
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Copiar e instalar dependencias Python primero (aprovecha caché de capas)
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# 3. Copiar el código fuente del proyecto
+COPY api/   ./api/
+COPY src/   ./src/
+
+# 4. Crear directorio de datos y caché de modelos
+RUN mkdir -p src/data .cache/huggingface
+
+# 5. Exponer el puerto de FastAPI
+EXPOSE 8000
+
+# 6. Comando de arranque (sin --reload en producción)
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,51 @@
+# .dockerignore
+# Archivos y carpetas que Docker NO debe copiar al construir la imagen
+
+# Control de versiones
+.git/
+.gitignore
+
+# Entornos virtuales de Python
+.venv/
+venv/
+env/
+
+# Caché de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Base de datos local (se maneja con volumen Docker)
+src/data/
+
+# Caché de modelos local (se maneja con volumen Docker)
+.cache/
+
+# Variables de entorno con secretos
+.env
+
+# Notebooks y archivos de desarrollo
+*.ipynb
+.ipynb_checkpoints/
+
+# Tests
+tests/
+pytest_cache/
+.coverage
+
+# Editores
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Documentación
+docs/
+*.md
+README*
+
+# OS
+.DS_Store
+Thumbs.db
