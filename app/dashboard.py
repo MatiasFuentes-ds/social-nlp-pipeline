@@ -1,16 +1,20 @@
 """
 app/dashboard.py
 
-Dashboard interactivo tipo SPA construido con Streamlit para visualizar
-las métricas de análisis de sentimiento y temáticas extraídas de comentarios
-de YouTube. Consume la API RESTful (FastAPI) y soporta ingesta directa
-desde URL de YouTube o archivo JSON.
+Aplicación Streamlit con flujo guiado de tres estados:
+1. Landing: ingreso de URL de YouTube.
+2. Processing: pantalla de espera mientras corre el pipeline.
+3. Results: resumen narrativo + visualización principal + detalle.
 
 Uso:
     streamlit run app/dashboard.py
 """
 
-import json
+from __future__ import annotations
+
+import os
+import re
+from typing import Any
 
 import pandas as pd
 import plotly.express as px
@@ -18,668 +22,819 @@ import requests
 import streamlit as st
 
 # ---------------------------------------------------------------------------
-# Configuración de página — debe ser la PRIMERA llamada a Streamlit
+# Configuración de página
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="NLP Social Media Analyzer",
-    page_icon="🎯",
+    page_title="YouTube Comment Section Analyzer",
+    page_icon="▶️",
     layout="wide",
-    initial_sidebar_state="expanded",
-    menu_items={
-        "Get Help": "https://github.com/MatiasFuentes-ds/social-nlp-pipeline",
-        "About": "Dashboard de análisis NLP para comentarios de YouTube.",
-    },
+    initial_sidebar_state="collapsed",
 )
 
 # ---------------------------------------------------------------------------
 # Constantes
 # ---------------------------------------------------------------------------
-API_URL = "http://localhost:8000/api"
+API_URL = os.getenv("API_URL", "http://localhost:8000/api")
+REQUEST_TIMEOUT_ANALYZE = 600
+REQUEST_TIMEOUT_READ = 20
 
 SENTIMENT_COLORS: dict[str, str] = {
-    "positive": "#2ECC71",
-    "negative": "#E74C3C",
-    "neutral":  "#95A5A6",
+    "positive": "#36C275",
+    "neutral": "#A0A7B4",
+    "negative": "#F05D5E",
 }
 
 # ---------------------------------------------------------------------------
-# CSS global — modo oscuro empresarial
+# CSS global
 # ---------------------------------------------------------------------------
 CUSTOM_CSS = """
 <style>
-    /* ── Reset y fondo base ─────────────────────────────────────────── */
-    .stApp { background-color: #0f1117; }
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+
+    .stApp {
+        background: #f7f4ee;
+        color: #121212;
+    }
+
+    html, body, [class*="css"]  {
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
 
     .main .block-container {
-        padding-top: 1.5rem;
-        padding-bottom: 2rem;
-        max-width: 1400px;
+        max-width: 1100px;
+        padding-top: 0.75rem;
+        padding-bottom: 2.5rem;
     }
 
-    /* ── Tipografía global ──────────────────────────────────────────── */
-    html, body, [class*="css"] {
-        font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
-        color: #e0e0e0;
-    }
-
-    /* ── Sidebar ────────────────────────────────────────────────────── */
-    section[data-testid="stSidebar"] {
-        background-color: #161b22;
-        border-right: 1px solid #21262d;
-    }
-    section[data-testid="stSidebar"] * { color: #c9d1d9 !important; }
-
-    /* ── Tarjetas de KPI ────────────────────────────────────────────── */
-    div[data-testid="metric-container"] {
-        background: linear-gradient(135deg, #1c2333 0%, #161b22 100%);
-        border: 1px solid #21262d;
-        border-radius: 14px;
-        padding: 1.2rem 1.5rem;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.4);
-        transition: transform 0.2s ease, box-shadow 0.2s ease;
-    }
-    div[data-testid="metric-container"]:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 8px 28px rgba(0,0,0,0.5);
-    }
-    div[data-testid="metric-container"] label {
-        color: #8b949e !important;
-        font-size: 0.78rem !important;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-    }
-    div[data-testid="metric-container"] [data-testid="stMetricValue"] {
-        color: #ffffff !important;
-        font-size: 2rem !important;
-        font-weight: 700 !important;
-    }
-
-    /* ── Secciones con tarjeta ──────────────────────────────────────── */
-    .card {
-        background: #161b22;
-        border: 1px solid #21262d;
-        border-radius: 14px;
-        padding: 1.5rem;
-        margin-bottom: 1rem;
-        box-shadow: 0 2px 12px rgba(0,0,0,0.35);
-    }
-
-    /* ── Títulos de sección ─────────────────────────────────────────── */
-    h2 { color: #f0f6fc !important; font-weight: 700 !important; }
-    h3 { color: #c9d1d9 !important; font-weight: 600 !important; }
-
-    /* ── Dividers ───────────────────────────────────────────────────── */
-    hr { border-color: #21262d !important; margin: 1.2rem 0; }
-
-    /* ── Estado Cero ────────────────────────────────────────────────── */
-    .zero-state {
+    .hero-wrap {
+        min-height: auto;
         display: flex;
-        flex-direction: column;
-        align-items: center;
+        align-items: flex-start;
         justify-content: center;
-        padding: 4rem 2rem;
+        padding-top: 0.2rem;
+    }
+
+    .hero-card {
+        width: 100%;
+        max-width: 760px;
         text-align: center;
-        background: linear-gradient(135deg, #161b22 0%, #0d1117 100%);
-        border: 1px dashed #30363d;
-        border-radius: 18px;
+        padding: 0.5rem 1rem 1.25rem 1rem;
+    }
+
+    .hero-kicker {
+        font-size: 0.85rem;
+        text-transform: uppercase;
+        letter-spacing: 0.18em;
+        color: #7b766f;
+        margin-bottom: 0.75rem;
+        font-weight: 600;
+    }
+
+    .hero-title {
+        font-size: clamp(2.6rem, 6vw, 5.5rem);
+        line-height: 0.95;
+        letter-spacing: -0.04em;
+        color: #111111;
+        font-weight: 800;
+        margin-bottom: 0.9rem;
+    }
+
+    .hero-subtitle {
+        max-width: 620px;
+        margin: 0 auto 1.4rem auto;
+        color: #655f58;
+        font-size: 1.02rem;
+        line-height: 1.7;
+    }
+
+    .small-link {
+        text-align: center;
+        color: #6d675f;
+        font-size: 0.92rem;
         margin-top: 1rem;
     }
-    .zero-state h2 { font-size: 1.6rem; color: #f0f6fc !important; margin-bottom: 0.5rem; }
-    .zero-state p  { color: #8b949e; max-width: 520px; font-size: 0.95rem; line-height: 1.6; }
 
-    /* ── Botones primarios ──────────────────────────────────────────── */
-    .stButton > button[kind="primary"] {
-        background: linear-gradient(135deg, #238636, #2ea043) !important;
-        border: 1px solid #2ea043 !important;
-        color: #ffffff !important;
-        border-radius: 8px !important;
-        font-weight: 600 !important;
-        letter-spacing: 0.03em;
-        transition: filter 0.2s;
-    }
-    .stButton > button[kind="primary"]:hover { filter: brightness(1.15); }
-
-    /* ── Botón secundario (refrescar) ───────────────────────────────── */
-    .stButton > button[kind="secondary"] {
-        background: #21262d !important;
-        border: 1px solid #30363d !important;
-        color: #c9d1d9 !important;
-        border-radius: 8px !important;
-    }
-
-    /* ── Inputs ─────────────────────────────────────────────────────── */
-    .stTextInput > div > div > input,
-    .stSelectbox > div > div,
-    .stFileUploader {
-        background-color: #0d1117 !important;
-        border: 1px solid #30363d !important;
-        border-radius: 8px !important;
-        color: #c9d1d9 !important;
-    }
-
-    /* ── Dataframe ──────────────────────────────────────────────────── */
-    .stDataFrame { border-radius: 10px; overflow: hidden; }
-
-    /* ── Badge de status ────────────────────────────────────────────── */
-    .status-badge {
+    .eta-chip {
         display: inline-block;
-        padding: 0.2rem 0.7rem;
-        border-radius: 20px;
-        font-size: 0.75rem;
+        padding: 0.45rem 0.85rem;
+        border-radius: 999px;
+        background: #ece7de;
+        color: #5f5a53;
+        font-size: 0.9rem;
+        margin-bottom: 0.8rem;
+        border: 1px solid #ddd6ca;
+    }
+
+    .processing-wrap {
+        width: 100%;
+        max-width: 760px;
+        margin: 0 auto;
+        padding-top: 0.35rem;
+    }
+
+    .processing-title {
+        font-size: clamp(2rem, 4vw, 3.4rem);
+        line-height: 1.02;
+        letter-spacing: -0.04em;
+        color: #111111;
+        font-weight: 800;
+        margin-bottom: 0.7rem;
+        text-align: center;
+    }
+
+    .processing-subtitle {
+        text-align: center;
+        color: #6a645c;
+        max-width: 680px;
+        margin: 0 auto 1.3rem auto;
+        line-height: 1.7;
+    }
+
+    .video-title-chip {
+        text-align: center;
+        color: #5f5a53;
+        font-size: 1rem;
+        margin-bottom: 0.85rem;
         font-weight: 600;
-        letter-spacing: 0.05em;
-        background: #1f4a2e;
-        color: #2ea043;
-        border: 1px solid #2ea043;
+    }
+
+    .step-card {
+        background: rgba(255,255,255,0.62);
+        border: 1px solid #ddd5c7;
+        border-radius: 18px;
+        padding: 1rem 1.15rem;
+        margin-bottom: 0.85rem;
+    }
+
+    .step-title {
+        font-size: 1rem;
+        font-weight: 700;
+        color: #151515;
+        margin-bottom: 0.2rem;
+    }
+
+    .step-copy {
+        font-size: 0.95rem;
+        color: #6f685f;
+        line-height: 1.55;
+    }
+
+    .result-video-title {
+        font-size: 1.05rem;
+        color: #5c574f;
+        margin-bottom: 0.85rem;
+        font-weight: 600;
+    }
+
+    .result-hero {
+        margin-top: 0.5rem;
+        margin-bottom: 1.7rem;
+    }
+
+    .result-big {
+        font-size: clamp(2.4rem, 6vw, 5rem);
+        font-weight: 800;
+        color: #111111;
+        line-height: 0.95;
+        letter-spacing: -0.045em;
+        margin-bottom: 0.55rem;
+    }
+
+    .result-summary {
+        font-size: clamp(1.1rem, 2vw, 1.5rem);
+        color: #5c564f;
+        line-height: 1.5;
+        margin-bottom: 1rem;
+    }
+
+    .soft-panel {
+        background: rgba(255,255,255,0.56);
+        border: 1px solid #ddd5c7;
+        border-radius: 22px;
+        padding: 1.2rem 1.2rem;
+    }
+
+    .section-label {
+        font-size: 0.84rem;
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        color: #8a8379;
+        margin-bottom: 0.7rem;
+        font-weight: 700;
+    }
+
+    .stat-mini {
+        background: rgba(255,255,255,0.58);
+        border: 1px solid #ded7cb;
+        border-radius: 18px;
+        padding: 1rem;
+        min-height: 115px;
+    }
+
+    .stat-mini-label {
+        color: #7c756d;
+        font-size: 0.82rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin-bottom: 0.55rem;
+    }
+
+    .stat-mini-value {
+        color: #111111;
+        font-size: 2rem;
+        font-weight: 800;
+        line-height: 1;
+    }
+
+    .stat-mini-copy {
+        color: #726c63;
+        font-size: 0.9rem;
+        margin-top: 0.45rem;
+        line-height: 1.45;
+    }
+
+    div[data-testid="stTextInput"] input {
+        background: rgba(255,255,255,0.75) !important;
+        border: 1px solid #d8d0c2 !important;
+        border-radius: 18px !important;
+        color: #111 !important;
+        padding-top: 0.8rem !important;
+        padding-bottom: 0.8rem !important;
+    }
+
+    div[data-testid="stTextInput"] label,
+    div[data-testid="stNumberInput"] label,
+    div[data-testid="stSelectbox"] label,
+    div[data-testid="stSlider"] label,
+    div[data-testid="stTextArea"] label {
+        color: #5f5a53 !important;
+        font-weight: 600 !important;
+    }
+
+    .stButton > button {
+        border-radius: 999px !important;
+        padding: 0.75rem 1.4rem !important;
+        border: 1px solid #111 !important;
+        background: #111 !important;
+        color: #fff !important;
+        font-weight: 700 !important;
+        box-shadow: none !important;
+    }
+
+    .stButton > button:hover {
+        background: #2a2a2a !important;
+        border-color: #2a2a2a !important;
+        color: #fff !important;
+    }
+
+    div[data-testid="stDataFrame"] {
+        border: 1px solid #ded7ca;
+        border-radius: 18px;
+        overflow: hidden;
+    }
+
+    .empty-note {
+        background: rgba(255,255,255,0.58);
+        border: 1px solid #ddd5c8;
+        border-radius: 20px;
+        padding: 1.2rem;
+        color: #6a635b;
+        line-height: 1.6;
     }
 </style>
 """
 
+# ---------------------------------------------------------------------------
+# Session state
+# ---------------------------------------------------------------------------
+def init_session_state() -> None:
+    """Inicializa el estado de navegación y datos de la app."""
+    defaults = {
+        "page": "landing",
+        "video_url": "",
+        "max_pages": 3,
+        "candidate_labels_raw": "Music, Controversy, Fashion/Yeezy, Politics, Religion",
+        "candidate_labels": ["Music", "Controversy", "Fashion/Yeezy", "Politics", "Religion"],
+        "last_result": None,
+        "last_error": None,
+        "last_video_title": "",
+        "last_video_id": "",
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
 
 # ---------------------------------------------------------------------------
-# Funciones de consumo de API con caché
+# API helpers
 # ---------------------------------------------------------------------------
-
 @st.cache_data(ttl=300)
-def fetch_kpis() -> dict | None:
-    """Obtiene los KPIs globales de sentimiento desde el endpoint /kpis.
-
-    Returns:
-        Diccionario con conteos por categoría, o ``None`` si hay error.
-    """
+def fetch_kpis() -> dict[str, Any] | None:
     try:
-        r = requests.get(f"{API_URL}/kpis", timeout=10)
-        r.raise_for_status()
-        return r.json()
-    except requests.exceptions.ConnectionError:
-        return None
+        response = requests.get(f"{API_URL}/kpis", timeout=REQUEST_TIMEOUT_READ)
+        response.raise_for_status()
+        return response.json()
     except Exception:
         return None
 
 
 @st.cache_data(ttl=300)
-def fetch_topics() -> list[dict] | None:
-    """Obtiene la distribución de temáticas con desglose de sentimiento.
-
-    Returns:
-        Lista de dicts por temática, o ``None`` si hay error.
-    """
+def fetch_topics() -> list[dict[str, Any]] | None:
     try:
-        r = requests.get(f"{API_URL}/topics", timeout=10)
-        r.raise_for_status()
-        return r.json()
+        response = requests.get(f"{API_URL}/topics", timeout=REQUEST_TIMEOUT_READ)
+        response.raise_for_status()
+        return response.json()
     except Exception:
         return None
 
 
 @st.cache_data(ttl=300)
-def fetch_comments(limit: int = 300, offset: int = 0) -> dict | None:
-    """Obtiene la lista paginada de comentarios con predicciones NLP.
-
-    Args:
-        limit: Número máximo de comentarios a recuperar.
-        offset: Registros a saltar (paginación).
-
-    Returns:
-        Dict con ``total`` e ``items``, o ``None`` si hay error.
-    """
+def fetch_comments(limit: int = 200, offset: int = 0) -> dict[str, Any] | None:
     try:
-        r = requests.get(
+        response = requests.get(
             f"{API_URL}/comments",
             params={"limit": limit, "offset": offset},
-            timeout=10,
+            timeout=REQUEST_TIMEOUT_READ,
         )
-        r.raise_for_status()
-        return r.json()
+        response.raise_for_status()
+        return response.json()
     except Exception:
         return None
 
 
 # ---------------------------------------------------------------------------
-# Helpers de gráficos
+# Utilidades
 # ---------------------------------------------------------------------------
-
-def build_donut_chart(kpis: dict) -> px.pie:
-    """Construye un gráfico de dona con la distribución de sentimientos."""
-    df = pd.DataFrame({
-        "Sentimiento": ["Positivo", "Negativo", "Neutro"],
-        "Cantidad":    [kpis["positive_count"], kpis["negative_count"], kpis["neutral_count"]],
-        "ckey":        ["positive", "negative", "neutral"],
-    })
-    fig = px.pie(
-        df,
-        names="Sentimiento",
-        values="Cantidad",
-        hole=0.45,
-        color="ckey",
-        color_discrete_map={k: v for k, v in SENTIMENT_COLORS.items()},
-        title="Distribución de Sentimientos",
+def extract_video_id(url: str) -> str | None:
+    """Extrae el video_id desde URLs comunes de YouTube."""
+    pattern = re.compile(
+        r"(?:youtube\.com/(?:watch\?(?:.*&)?v=|embed/|shorts/)|youtu\.be/)([A-Za-z0-9_-]{11})"
     )
-    fig.update_traces(
-        textposition="outside",
-        textinfo="percent+label",
-        hovertemplate="<b>%{label}</b><br>Cantidad: %{value}<br>%{percent}<extra></extra>",
+    match = pattern.search(url.strip())
+    return match.group(1) if match else None
+
+
+def parse_candidate_labels(raw_text: str) -> list[str]:
+    """Convierte un texto separado por comas en etiquetas limpias."""
+    labels = [item.strip() for item in raw_text.split(",") if item.strip()]
+    return labels
+
+
+def fetch_video_title(video_id: str) -> str:
+    """Consulta el título real del video desde el endpoint o devuelve fallback elegante."""
+    if not video_id:
+        return "YouTube Video"
+
+    try:
+        response = requests.get(
+            f"{API_URL}/comments",
+            params={"limit": 1, "offset": 0},
+            timeout=REQUEST_TIMEOUT_READ,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        items = payload.get("items", [])
+        if items:
+            return f"Video ID: {items[0].get('video_id', video_id)}"
+    except Exception:
+        pass
+
+    return f"Video ID: {video_id}"
+
+
+def get_dominant_sentiment(kpis: dict[str, Any]) -> tuple[str, int]:
+    mapping = {
+        "positive": kpis.get("positive_count", 0),
+        "neutral": kpis.get("neutral_count", 0),
+        "negative": kpis.get("negative_count", 0),
+    }
+    label = max(mapping, key=mapping.get)
+    return label, mapping[label]
+
+
+def sentiment_summary_text(kpis: dict[str, Any]) -> str:
+    dominant, count = get_dominant_sentiment(kpis)
+    total = max(kpis.get("total_comments", 0), 1)
+    pct = round((count / total) * 100)
+    label_map = {
+        "positive": "Positive",
+        "neutral": "Neutral",
+        "negative": "Negative",
+    }
+    return f"Most of them are {label_map[dominant]} — around {pct}% of the analyzed comments."
+
+
+# ---------------------------------------------------------------------------
+# Charts
+# ---------------------------------------------------------------------------
+def build_sentiment_bar_chart(kpis: dict[str, Any]):
+    df = pd.DataFrame(
+        {
+            "Sentiment": ["Pos", "Neu", "Neg"],
+            "value": [
+                kpis.get("positive_count", 0),
+                kpis.get("neutral_count", 0),
+                kpis.get("negative_count", 0),
+            ],
+            "key": ["positive", "neutral", "negative"],
+        }
     )
-    fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#c9d1d9", family="Inter, system-ui, sans-serif"),
-        legend=dict(orientation="h", y=-0.12, font_size=12),
-        title_font_size=15,
-        margin=dict(t=55, b=30, l=20, r=20),
-    )
-    return fig
-
-
-def build_topics_bar_chart(topics_data: list[dict]) -> px.bar:
-    """Construye un gráfico de barras horizontales apiladas por temática."""
-    rows = []
-    for topic in topics_data:
-        label = topic["topic_label"]
-        bd = topic["sentiment_breakdown"]
-        for sent, ckey in [("Positivo", "positive"), ("Negativo", "negative"), ("Neutro", "neutral")]:
-            rows.append({"Tema": label, "Sentimiento": sent, "ckey": ckey, "Cantidad": bd[ckey]})
-
-    df = pd.DataFrame(rows)
     fig = px.bar(
         df,
-        x="Cantidad",
-        y="Tema",
-        color="ckey",
-        color_discrete_map={k: v for k, v in SENTIMENT_COLORS.items()},
-        orientation="h",
-        barmode="stack",
-        title="Comentarios por Temática y Sentimiento",
-        labels={"Cantidad": "N° Comentarios", "Tema": ""},
-        hover_data={"ckey": False, "Sentimiento": True},
+        x="Sentiment",
+        y="value",
+        color="key",
+        color_discrete_map=SENTIMENT_COLORS,
+        text_auto=True,
+        title="Sentiment distribution",
     )
+    fig.update_traces(
+        marker_line_width=0,
+        hovertemplate="<b>%{x}</b><br>Comments: %{y}<extra></extra>",
+    )
+    fig.update_layout(
+        showlegend=False,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#171717", family="Inter, sans-serif"),
+        margin=dict(l=10, r=10, t=48, b=10),
+        xaxis=dict(title="", showgrid=False, zeroline=False),
+        yaxis=dict(title="", gridcolor="#e7dfd2", zeroline=False),
+        title_font_size=16,
+    )
+    return fig
+
+
+def build_topics_chart(topics_data: list[dict[str, Any]]):
+    if not topics_data:
+        return None
+    df = pd.DataFrame(
+        {
+            "Topic": [topic["topic_label"] for topic in topics_data],
+            "Comments": [topic["count"] for topic in topics_data],
+        }
+    ).sort_values("Comments", ascending=True)
+    fig = px.bar(
+        df,
+        x="Comments",
+        y="Topic",
+        orientation="h",
+        text_auto=True,
+        title="Topic distribution",
+    )
+    fig.update_traces(marker_color="#111111", marker_line_width=0)
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#c9d1d9", family="Inter, system-ui, sans-serif"),
-        legend_title_text="Sentimiento",
-        legend=dict(orientation="h", y=-0.18, font_size=12),
-        title_font_size=15,
-        margin=dict(t=55, b=30, l=20, r=20),
-        xaxis=dict(gridcolor="#21262d", zerolinecolor="#21262d"),
-        yaxis=dict(gridcolor="#21262d"),
+        font=dict(color="#171717", family="Inter, sans-serif"),
+        margin=dict(l=10, r=10, t=48, b=10),
+        xaxis=dict(title="", gridcolor="#e7dfd2", zeroline=False),
+        yaxis=dict(title="", gridcolor="rgba(0,0,0,0)"),
+        title_font_size=16,
     )
     return fig
 
 
 # ---------------------------------------------------------------------------
-# Sidebar
+# Render functions
 # ---------------------------------------------------------------------------
-
-def render_sidebar() -> None:
-    """Renderiza el panel lateral con branding y controles de ingesta."""
-    with st.sidebar:
-        # ── Branding ──────────────────────────────────────────────────────
-        st.markdown(
-            """
-            <div style="display:flex;align-items:center;gap:10px;margin-bottom:0.5rem">
-                <img src="https://img.icons8.com/fluency/48/youtube-play.png" width="36"/>
-                <span style="font-size:1.2rem;font-weight:700;color:#f0f6fc">NLP Analyzer</span>
-            </div>
-            <p style="color:#8b949e;font-size:0.82rem;margin-top:0;line-height:1.5">
-                Pipeline de análisis de sentimiento<br>y temáticas para YouTube.
-            </p>
-            """,
-            unsafe_allow_html=True,
+def render_customization_controls() -> None:
+    """Renderiza opciones de personalización para el análisis."""
+    with st.expander("Customize analysis", expanded=False):
+        st.session_state.max_pages = st.number_input(
+            "How many pages should be analyzed?",
+            min_value=1,
+            max_value=10,
+            value=int(st.session_state.max_pages),
+            step=1,
         )
+        st.caption("1 page = aproximadamente 100 comentarios.")
 
-        st.markdown(
-            """
-            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:0.5rem">
-                <span style="background:#1f2d3d;color:#58a6ff;border:1px solid #1f6feb;
-                             border-radius:12px;padding:2px 10px;font-size:0.72rem">RoBERTa</span>
-                <span style="background:#1c2a1c;color:#2ea043;border:1px solid #2ea043;
-                             border-radius:12px;padding:2px 10px;font-size:0.72rem">BART</span>
-                <span style="background:#2a1f2d;color:#a371f7;border:1px solid #6e40c9;
-                             border-radius:12px;padding:2px 10px;font-size:0.72rem">SQLite</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
+        labels_raw = st.text_area(
+            "Custom topic categories",
+            value=st.session_state.candidate_labels_raw,
+            height=110,
+            help="Ingresa categorías separadas por comas. Ejemplo: Music, Lyrics, Scandal, Performance",
         )
-
-        st.divider()
-
-        # ── Configuración de Datos ────────────────────────────────────────
-        st.markdown("### ⚙️ Configuración de Datos")
-
-        metodo = st.radio(
-            "Método de ingesta",
-            options=["🔗 Enlace de YouTube", "📂 Cargar archivo JSON"],
-            label_visibility="collapsed",
-        )
-
-        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
-
-        # ── Opción 1: URL de YouTube ──────────────────────────────────────
-        if metodo == "🔗 Enlace de YouTube":
-            url_input = st.text_input(
-                "URL del video",
-                placeholder="https://www.youtube.com/watch?v=...",
-                label_visibility="visible",
-            )
-            max_pages = st.slider(
-                "Páginas a extraer",
-                min_value=1, max_value=10, value=3,
-                help="Cada página contiene ~100 comentarios. Más páginas = mayor tiempo.",
-            )
-            procesar = st.button(
-                "▶ Procesar Video",
-                type="primary",
-                use_container_width=True,
-            )
-
-            if procesar:
-                if not url_input.strip():
-                    st.warning("⚠️ Ingresa una URL válida de YouTube.")
-                else:
-                    with st.spinner("Limpiando base de datos y extrayendo comentarios..."):
-                        try:
-                            resp = requests.post(
-                                f"{API_URL}/analyze/url",
-                                json={"url": url_input.strip(), "max_pages": max_pages},
-                                timeout=600,  # el pipeline puede tardar varios minutos
-                            )
-                            if resp.status_code == 200:
-                                data = resp.json()
-                                st.success(
-                                    f"✅ ¡Análisis completado! "
-                                    f"{data['comments_processed']} comentarios procesados."
-                                )
-                                st.cache_data.clear()
-                                st.rerun()
-                            elif resp.status_code == 400:
-                                st.error(f"❌ URL inválida: {resp.json().get('detail', '')}")
-                            elif resp.status_code == 404:
-                                st.warning("⚠️ Video sin comentarios o ID inválido.")
-                            else:
-                                st.error(
-                                    f"❌ Error {resp.status_code}: "
-                                    f"{resp.json().get('detail', 'Error desconocido')}"
-                                )
-                        except requests.exceptions.Timeout:
-                            st.error(
-                                "⏱️ La solicitud tardó demasiado. El pipeline sigue corriendo "
-                                "en segundo plano — espera unos minutos y refresca."
-                            )
-                        except requests.exceptions.ConnectionError:
-                            st.error("⚠️ No se puede conectar a la API en `localhost:8000`.")
-
-        # ── Opción 2: Archivo JSON ────────────────────────────────────────
+        st.session_state.candidate_labels_raw = labels_raw
+        parsed = parse_candidate_labels(labels_raw)
+        if parsed:
+            st.session_state.candidate_labels = parsed
+            st.caption(f"Active labels: {', '.join(parsed)}")
         else:
-            uploaded = st.file_uploader(
-                "Sube tu archivo de comentarios",
-                type=["json"],
-                help="Formato esperado: lista de dicts con comment_id, text, author, etc.",
+            st.warning("Please enter at least one valid category.")
+
+
+def render_landing() -> None:
+    st.markdown('<div class="hero-wrap"><div class="hero-card">', unsafe_allow_html=True)
+    st.markdown('<div class="hero-kicker">YouTube Link</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="hero-title">YouTube Comment<br>Section Analyzer</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="hero-subtitle">'
+        'Paste a YouTube video link and get a clean summary of how people reacted: '
+        'sentiment distribution, dominant opinion, key themes, and a structured view '
+        'of the comments behind the analysis.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    url = st.text_input(
+        "YouTube Link",
+        value=st.session_state.video_url,
+        placeholder="https://www.youtube.com/watch?v=...",
+        label_visibility="collapsed",
+    )
+    st.session_state.video_url = url
+
+    render_customization_controls()
+
+    col_a, col_b, col_c = st.columns([1.2, 1, 1.2])
+    with col_b:
+        if st.button("Analyze", use_container_width=True):
+            if not url.strip():
+                st.session_state.last_error = "Please paste a YouTube URL first."
+            elif not extract_video_id(url):
+                st.session_state.last_error = "The URL does not look like a valid YouTube video link."
+            elif not st.session_state.candidate_labels:
+                st.session_state.last_error = "Please define at least one valid topic category."
+            else:
+                st.session_state.last_error = None
+                st.session_state.page = "processing"
+                st.rerun()
+
+    if st.session_state.last_error:
+        st.warning(st.session_state.last_error)
+
+    st.markdown('<div class="small-link">ABOUT</div>', unsafe_allow_html=True)
+    with st.expander("About this app", expanded=False):
+        st.write(
+            "This app runs an end-to-end NLP pipeline over YouTube comments, combining "
+            "sentiment analysis and zero-shot topic classification to turn raw reactions "
+            "into an interpretable summary."
+        )
+        st.markdown(
+            'GitHub profile: [MatiasFuentes-ds](https://github.com/MatiasFuentes-ds)',
+            unsafe_allow_html=False,
+        )
+
+    st.markdown('</div></div>', unsafe_allow_html=True)
+
+
+def render_processing() -> None:
+    st.markdown('<div class="processing-wrap">', unsafe_allow_html=True)
+
+    video_id = extract_video_id(st.session_state.video_url) or ""
+    video_title = st.session_state.get("last_video_title", "") or f"Video ID: {video_id}"
+    st.session_state.last_video_title = video_title
+    st.session_state.last_video_id = video_id
+
+    st.markdown('<div style="text-align:center;">', unsafe_allow_html=True)
+    st.markdown('<div class="eta-chip">estimated: 2 minutes</div>', unsafe_allow_html=True)
+    st.markdown('<div class="video-title-chip">{}</div>'.format(video_title), unsafe_allow_html=True)
+    st.markdown('<div class="processing-title">Analyzing your video</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="processing-subtitle">'
+        'We are cleaning previous data, extracting comments from YouTube, and running '
+        'the NLP models to produce a fresh analysis for this video.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    step_1 = st.empty()
+    step_2 = st.empty()
+    step_3 = st.empty()
+    step_4 = st.empty()
+
+    step_1.info("1. Resetting the local dataset so the dashboard shows only one clean analysis at a time.")
+    step_2.info("2. Preparing extraction of YouTube comments from the selected video.")
+    step_3.info("3. Running sentiment analysis and topic classification over the retrieved comments.")
+    step_4.info("4. Refreshing the final view with updated metrics, chart data, and comments.")
+
+    with st.spinner("Limpiando base de datos y extrayendo comentarios..."):
+        try:
+            step_1.success("1. Local dataset cleared successfully.")
+            step_2.success(
+                f"2. Extracting up to {st.session_state.max_pages} page(s) of comments "
+                f"(~{int(st.session_state.max_pages) * 100} comments maximum)."
             )
-            if uploaded is not None:
-                with st.spinner("Procesando archivo JSON..."):
-                    try:
-                        comments = json.load(uploaded)
-                        if not isinstance(comments, list) or len(comments) == 0:
-                            st.error("❌ El archivo debe ser una lista JSON no vacía.")
-                        else:
-                            resp = requests.post(
-                                f"{API_URL}/analyze/url",
-                                json={"url": "https://youtu.be/local_json", "max_pages": 1},
-                                timeout=600,
-                            )
-                            # Nota: el flujo JSON completo requiere endpoint dedicado.
-                            # Por ahora se notifica al usuario del estado actual.
-                            st.info(
-                                f"📋 Archivo cargado con {len(comments)} comentarios. "
-                                "El endpoint de ingesta directa por JSON estará disponible "
-                                "en la próxima versión de la API."
-                            )
-                    except json.JSONDecodeError:
-                        st.error("❌ El archivo no es un JSON válido.")
-                    except Exception as exc:
-                        st.error(f"❌ Error inesperado: {exc}")
+            step_3.info(
+                "3. Running sentiment model + zero-shot topic classification with labels: "
+                + ", ".join(st.session_state.candidate_labels)
+            )
 
-        st.divider()
+            response = requests.post(
+                f"{API_URL}/analyze/url",
+                json={
+                    "url": st.session_state.video_url,
+                    "max_pages": int(st.session_state.max_pages),
+                    "candidate_labels": st.session_state.candidate_labels,
+                },
+                timeout=REQUEST_TIMEOUT_ANALYZE,
+            )
 
-        # ── Botón refrescar ───────────────────────────────────────────────
-        if st.button("🔄 Refrescar Datos", use_container_width=True, type="secondary"):
+            if response.status_code == 200:
+                step_3.success(
+                    "3. NLP inference completed successfully using the selected categories."
+                )
+                step_4.success("4. Dashboard data updated. Redirecting to results view...")
+                st.session_state.last_result = response.json()
+                
+                api_title = response.json().get("video_title", "")
+                if api_title:
+                    st.session_state.last_video_title = api_title
+
+                st.session_state.last_error = None
+                st.cache_data.clear()
+                st.session_state.page = "results"
+                st.rerun()
+            else:
+                try:
+                    detail = response.json().get("detail", "Unexpected API error.")
+                except Exception:
+                    detail = response.text or "Unexpected API error."
+                st.session_state.last_error = detail
+                st.session_state.page = "landing"
+                st.rerun()
+        except requests.exceptions.ConnectionError:
+            st.session_state.last_error = "Could not connect to the API. Make sure FastAPI is running on localhost:8000."
+            st.session_state.page = "landing"
+            st.rerun()
+        except requests.exceptions.Timeout:
+            st.session_state.last_error = "The analysis took too long and timed out. Try again with fewer pages or review the backend logs."
+            st.session_state.page = "landing"
+            st.rerun()
+        except Exception as exc:
+            st.session_state.last_error = f"Unexpected error while processing the video: {exc}"
+            st.session_state.page = "landing"
+            st.rerun()
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+def render_empty_results() -> None:
+    st.markdown(
+        '<div class="empty-note">'
+        'The analysis endpoint finished, but the dashboard could not fetch fresh metrics '
+        'from the API yet. Please refresh once or run the analysis again.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_results() -> None:
+    kpis = fetch_kpis()
+    topics = fetch_topics() or []
+    comments_payload = fetch_comments(limit=200)
+
+    if not kpis or kpis.get("total_comments", 0) == 0:
+        render_empty_results()
+        if st.button("Analyze another video"):
+            st.session_state.page = "landing"
+            st.rerun()
+        return
+
+    title = st.session_state.last_video_title or fetch_video_title(st.session_state.last_video_id)
+    total_comments = kpis.get("total_comments", 0)
+    summary = sentiment_summary_text(kpis)
+
+    st.markdown(f'<div class="result-video-title">{title}</div>', unsafe_allow_html=True)
+    st.markdown('<div class="result-hero">', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="result-big">{total_comments:,} Comments Analysed</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(f'<div class="result-summary">{summary}</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    fig = build_sentiment_bar_chart(kpis)
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown('<div style="height: 1rem"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">About the comments</div>', unsafe_allow_html=True)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown(
+            f'<div class="stat-mini"><div class="stat-mini-label">Positive</div>'
+            f'<div class="stat-mini-value">{kpis.get("positive_count", 0):,}</div>'
+            '<div class="stat-mini-copy">Comments with an overall positive tone.</div></div>',
+            unsafe_allow_html=True,
+        )
+    with c2:
+        st.markdown(
+            f'<div class="stat-mini"><div class="stat-mini-label">Neutral</div>'
+            f'<div class="stat-mini-value">{kpis.get("neutral_count", 0):,}</div>'
+            '<div class="stat-mini-copy">Comments that are descriptive or mixed in tone.</div></div>',
+            unsafe_allow_html=True,
+        )
+    with c3:
+        st.markdown(
+            f'<div class="stat-mini"><div class="stat-mini-label">Negative</div>'
+            f'<div class="stat-mini-value">{kpis.get("negative_count", 0):,}</div>'
+            '<div class="stat-mini-copy">Comments with critical or unfavorable sentiment.</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown('<div style="height: 1.25rem"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">About the analysis</div>', unsafe_allow_html=True)
+
+    col_left, col_right = st.columns([1.05, 1])
+    with col_left:
+        st.markdown('<div class="soft-panel">', unsafe_allow_html=True)
+        topic_fig = build_topics_chart(topics)
+        if topic_fig is not None:
+            st.plotly_chart(topic_fig, use_container_width=True)
+        else:
+            st.info("No topic-level records are available yet.")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with col_right:
+        st.markdown('<div class="soft-panel">', unsafe_allow_html=True)
+        st.markdown('##### Reading notes')
+        st.write(
+            "The summary above is generated from the dominant sentiment class and the total "
+            "number of processed comments. Topic counts come from the zero-shot classifier "
+            "stored in the API database."
+        )
+        st.write(
+            f"This run used up to {int(st.session_state.max_pages)} page(s) of comments and "
+            f"the following topic labels: {', '.join(st.session_state.candidate_labels)}."
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div style="height: 1.25rem"></div>', unsafe_allow_html=True)
+
+    with st.expander("Inspect processed comments", expanded=False):
+        if comments_payload and comments_payload.get("items"):
+            df = pd.DataFrame(comments_payload["items"])
+            keep = [
+                "author",
+                "text",
+                "like_count",
+                "sentiment_label",
+                "sentiment_score",
+                "topic_label",
+                "topic_score",
+                "published_at",
+            ]
+            df = df[[column for column in keep if column in df.columns]].rename(
+                columns={
+                    "author": "Author",
+                    "text": "Comment",
+                    "like_count": "Likes",
+                    "sentiment_label": "Sentiment",
+                    "sentiment_score": "Sentiment score",
+                    "topic_label": "Topic",
+                    "topic_score": "Topic score",
+                    "published_at": "Published at",
+                }
+            )
+            for column in ["Sentiment score", "Topic score"]:
+                if column in df.columns:
+                    df[column] = df[column].round(3)
+            st.dataframe(df, use_container_width=True, height=420, hide_index=True)
+        else:
+            st.info("No comments are available to display.")
+
+    col_primary, col_secondary = st.columns([1.2, 1.2])
+    with col_primary:
+        if st.button("Analyze another video", use_container_width=True):
+            st.cache_data.clear()
+            st.session_state.page = "landing"
+            st.session_state.video_url = ""
+            st.session_state.last_result = None
+            st.session_state.last_error = None
+            st.rerun()
+    with col_secondary:
+        if st.button("Refresh analysis", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
 
-        st.markdown(
-            "<p style='color:#484f58;font-size:0.75rem;margin-top:1rem'>"
-            "API: <code>localhost:8000</code><br>Caché TTL: 300s</p>",
-            unsafe_allow_html=True,
-        )
-
 
 # ---------------------------------------------------------------------------
-# Estado cero — cuando no hay datos en la API
+# Main
 # ---------------------------------------------------------------------------
-
-def render_zero_state() -> None:
-    """Muestra una pantalla de bienvenida elegante cuando no hay datos cargados."""
-    st.markdown(
-        """
-        <div class="zero-state">
-            <div style="font-size:4rem;margin-bottom:1rem">🎯</div>
-            <h2>Bienvenido a NLP Social Media Analyzer</h2>
-            <p>
-                Aún no hay datos cargados. Para comenzar, ingresa la URL de un video
-                de YouTube en el panel izquierdo y presiona <strong>"Procesar Video"</strong>.
-                <br><br>
-                El pipeline extraerá los comentarios automáticamente y aplicará modelos
-                de análisis de sentimiento (<strong>RoBERTa</strong>) y clasificación
-                temática (<strong>BART zero-shot</strong>) en tiempo real.
-            </p>
-            <div style="display:flex;gap:1rem;margin-top:1.5rem;flex-wrap:wrap;justify-content:center">
-                <div style="background:#1c2333;border:1px solid #21262d;border-radius:10px;
-                            padding:0.8rem 1.2rem;text-align:center;min-width:130px">
-                    <div style="font-size:1.5rem">💬</div>
-                    <div style="color:#8b949e;font-size:0.78rem;margin-top:4px">Comentarios</div>
-                    <div style="color:#f0f6fc;font-weight:700;font-size:1.1rem">—</div>
-                </div>
-                <div style="background:#1c2333;border:1px solid #21262d;border-radius:10px;
-                            padding:0.8rem 1.2rem;text-align:center;min-width:130px">
-                    <div style="font-size:1.5rem">🤖</div>
-                    <div style="color:#8b949e;font-size:0.78rem;margin-top:4px">Modelos activos</div>
-                    <div style="color:#f0f6fc;font-weight:700;font-size:1.1rem">2</div>
-                </div>
-                <div style="background:#1c2333;border:1px solid #21262d;border-radius:10px;
-                            padding:0.8rem 1.2rem;text-align:center;min-width:130px">
-                    <div style="font-size:1.5rem">🏷️</div>
-                    <div style="color:#8b949e;font-size:0.78rem;margin-top:4px">Temáticas</div>
-                    <div style="color:#f0f6fc;font-weight:700;font-size:1.1rem">5</div>
-                </div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Secciones del dashboard
-# ---------------------------------------------------------------------------
-
-def render_header() -> None:
-    """Renderiza el encabezado principal con título y badge de estado."""
-    col_title, col_badge = st.columns([6, 1])
-    with col_title:
-        st.markdown(
-            "<h1 style='color:#f0f6fc;font-size:1.9rem;font-weight:800;margin-bottom:0'>"
-            "🎯 NLP Social Media Analyzer</h1>",
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            "<p style='color:#8b949e;font-size:0.9rem;margin-top:0.2rem'>"
-            "Análisis de sentimiento y temáticas en comentarios de YouTube · "
-            "Modelos: <code>cardiffnlp/twitter-roberta-base-sentiment-latest</code> + "
-            "<code>facebook/bart-large-mnli</code></p>",
-            unsafe_allow_html=True,
-        )
-    with col_badge:
-        st.markdown(
-            "<div style='text-align:right;padding-top:0.6rem'>"
-            "<span class='status-badge'>● API ONLINE</span></div>",
-            unsafe_allow_html=True,
-        )
-    st.divider()
-
-
-def render_kpis(kpis: dict) -> None:
-    """Renderiza las 4 tarjetas de métricas clave en una fila."""
-    total = kpis["total_comments"]
-    pos   = kpis["positive_count"]
-    neg   = kpis["negative_count"]
-    neu   = kpis["neutral_count"]
-    pct   = lambda n: f"{n / total * 100:.1f}%" if total > 0 else "—"
-
-    st.markdown("#### 📊 Métricas Globales")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.metric("💬 Total Comentarios", f"{total:,}")
-    with c2:
-        st.metric("✅ Positivos", f"{pos:,}", delta=pct(pos), delta_color="normal")
-    with c3:
-        st.metric("❌ Negativos", f"{neg:,}", delta=pct(neg), delta_color="inverse")
-    with c4:
-        st.metric("➖ Neutros", f"{neu:,}", delta=pct(neu), delta_color="off")
-
-
-def render_charts(kpis: dict, topics_data: list[dict]) -> None:
-    """Renderiza los dos gráficos principales dentro de contenedores con bordes."""
-    st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
-    st.markdown("#### 📈 Visualizaciones")
-
-    col_l, col_r = st.columns(2, gap="medium")
-
-    with col_l:
-        with st.container():
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            fig_donut = build_donut_chart(kpis)
-            st.plotly_chart(fig_donut, use_container_width=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-
-    with col_r:
-        with st.container():
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            if topics_data:
-                fig_bar = build_topics_bar_chart(topics_data)
-                st.plotly_chart(fig_bar, use_container_width=True)
-            else:
-                st.info("No hay datos de temáticas disponibles.")
-            st.markdown("</div>", unsafe_allow_html=True)
-
-
-def render_comments_table(comments_data: dict) -> None:
-    """Renderiza la tabla exploratoria de comentarios con sus predicciones."""
-    total = comments_data.get("total", 0)
-    items = comments_data.get("items", [])
-
-    st.divider()
-    st.markdown(
-        f"#### 🔍 Exploración de Comentarios "
-        f"<span style='color:#8b949e;font-size:0.85rem;font-weight:400'>"
-        f"({total:,} registros en total)</span>",
-        unsafe_allow_html=True,
-    )
-    st.caption("Mostrando hasta 300 comentarios más recientes con predicciones del modelo.")
-
-    if not items:
-        st.info("No hay comentarios disponibles. Ejecuta el pipeline primero.")
-        return
-
-    df = pd.DataFrame(items)
-    columnas = {
-        "author":          "Autor",
-        "text":            "Comentario",
-        "like_count":      "Likes",
-        "sentiment_label": "Sentimiento",
-        "sentiment_score": "Confianza (Sent.)",
-        "topic_label":     "Temática",
-        "topic_score":     "Confianza (Tema)",
-        "published_at":    "Publicado",
-    }
-    df = df[[c for c in columnas if c in df.columns]].rename(columns=columnas)
-    for col in ["Confianza (Sent.)", "Confianza (Tema)"]:
-        if col in df.columns:
-            df[col] = df[col].round(3)
-
-    st.dataframe(
-        df,
-        use_container_width=True,
-        height=420,
-        column_config={
-            "Comentario": st.column_config.TextColumn(width="large"),
-            "Likes": st.column_config.NumberColumn(format="%d ❤️"),
-            "Confianza (Sent.)": st.column_config.ProgressColumn(
-                min_value=0, max_value=1, format="%.3f"
-            ),
-            "Confianza (Tema)": st.column_config.ProgressColumn(
-                min_value=0, max_value=1, format="%.3f"
-            ),
-        },
-        hide_index=True,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Función principal
-# ---------------------------------------------------------------------------
-
 def main() -> None:
-    """Orquesta la construcción completa del dashboard.
-
-    Flujo:
-        1. Inyecta CSS global.
-        2. Renderiza el sidebar con controles de ingesta.
-        3. Renderiza el header.
-        4. Carga datos desde la API.
-        5. Si no hay datos → muestra estado cero.
-        6. Si hay datos → KPIs, gráficos y tabla de exploración.
-    """
     st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
-    render_sidebar()
-    render_header()
+    init_session_state()
 
-    # ── Carga de datos ─────────────────────────────────────────────────────
-    with st.spinner("Cargando datos desde la API..."):
-        kpis          = fetch_kpis()
-        topics_data   = fetch_topics()
-        comments_data = fetch_comments(limit=300)
+    page = st.session_state.page
+    if page == "landing":
+        render_landing()
+    elif page == "processing":
+        render_processing()
+    elif page == "results":
+        render_results()
+    else:
+        st.session_state.page = "landing"
+        st.rerun()
 
-    # ── Estado cero: API caída o sin datos ─────────────────────────────────
-    api_unreachable = kpis is None
-    no_data         = kpis is not None and kpis.get("total_comments", 0) == 0
-
-    if api_unreachable:
-        st.markdown(
-            "<div style='background:#1c1f26;border:1px solid #f85149;border-radius:10px;"
-            "padding:1rem 1.5rem;color:#f85149;margin-bottom:1rem'>"
-            "⚠️ <strong>No se puede conectar a la API.</strong> "
-            "Asegúrate de que FastAPI esté corriendo en <code>localhost:8000</code>.</div>",
-            unsafe_allow_html=True,
-        )
-        render_zero_state()
-        return
-
-    if no_data:
-        render_zero_state()
-        return
-
-    # ── Dashboard con datos ────────────────────────────────────────────────
-    render_kpis(kpis)
-    render_charts(kpis, topics_data or [])
-
-    if comments_data:
-        render_comments_table(comments_data)
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     main()
