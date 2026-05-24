@@ -215,13 +215,19 @@ class AnalyzeURLRequest(BaseModel):
         description="Páginas de comentarios a extraer (1-10). Default: 3.",
     )
 
+    candidate_labels: List[str] = Field(
+    default=["Music", "Controversy", "Fashion", "Politics", "Religion"],
+    description="Etiquetas zero-shot para clasificación temática.",
+    )
+
+
 
 class AnalyzeURLResponse(BaseModel):
     """Respuesta devuelta tras completar el análisis de un video."""
-
     status: str = Field(..., examples=["success"])
     message: str
     video_id: str
+    video_title: str = Field(default="", description="Título del video de YouTube.")
     comments_processed: int
 
 
@@ -447,11 +453,12 @@ def analyze_url(request: AnalyzeURLRequest) -> AnalyzeURLResponse:
 
     try:
         # -- Paso 2: Purgar base de datos ----------------------------------------
-        with NLPProcessor(db_path=str(DB_PATH)) as processor:
+        with NLPProcessor(db_path=str(DB_PATH), candidate_labels=request.candidate_labels) as processor:
             processor.clear_database()
 
-            # -- Paso 3: Extraer comentarios -------------------------------------
             client = YoutubeDataClient()
+            video_title: str = client.get_video_title(video_id)
+            processor._video_title = video_title
             comments: List[Dict] = client.get_comments(
                 video_id=video_id,
                 max_pages=request.max_pages,
@@ -483,6 +490,7 @@ def analyze_url(request: AnalyzeURLRequest) -> AnalyzeURLResponse:
         status="success",
         message=f"Video '{video_id}' procesado correctamente.",
         video_id=video_id,
+        video_title=video_title,
         comments_processed=len(comments),
     )
 
