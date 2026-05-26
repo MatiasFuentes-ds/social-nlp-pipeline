@@ -1,4 +1,4 @@
-# Social Media NLP Pipeline
+# Youtube NLP Pipeline
 
 Un pipeline de datos *end-to-end* diseñado para la extracción, procesamiento de lenguaje natural (NLP) y visualización interactiva de comentarios masivos en redes sociales.
 
@@ -82,5 +82,11 @@ social-nlp-pipeline/
 ```
 
 ***
+
+## Tareas Pendientes
+
+- Graficar los puntos de confianza de clasificación por temática de cada comentario para estabilidad y ojalá encontrar un mejor modelo.
+- Mejorar básicas de UI.
+
 
 *Desarrollado por [Matías Fuentes](https://github.com/MatiasFuentes-ds) como proyecto de portafolio en Ingeniería de Datos end-to-end.*
